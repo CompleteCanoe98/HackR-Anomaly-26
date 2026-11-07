@@ -27,11 +27,11 @@ serverapp = "pytorchexample.server_app:app"
 clientapp = "pytorchexample.client_app:app"
 
 [tool.flwr.app.config]
-num-server-rounds = 3
+num-server-rounds = 5
 fraction-evaluate = 1.0
 local-epochs = 1
-learning-rate = 0.1
+learning-rate = 0.001
 batch-size = 32
 save-model = false
-malicious-fraction = 0.0
+malicious-fraction = 0.3
 attack-seed = 0
