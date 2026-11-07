@@ -1,109 +1,92 @@
-"""pytorchexample: A Flower / PyTorch app."""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import load_dataset
-from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import IidPartitioner
+from datasets import load_from_disk
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose, Normalize, ToTensor
+from torchvision.transforms import Compose, ToTensor
 
-
-class Net(nn.Module):
-    """Model (simple CNN adapted from 'PyTorch: A 60 Minute Blitz')"""
-
+# --- 1. THE MODEL ---
+class FEMNISTNet(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        super(FEMNISTNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1)
+        self.dropout1 = nn.Dropout(0.25)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 62) # 62 classes for FEMNIST
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
 
+# --- 2. DATA LOADING ---
+def load_data(partition_id: int, num_partitions: int):
+    """Loads a specific shard of the local FEMNIST dataset."""
+    dataset = load_from_disk("./local_femnist_data")
+    transform = Compose([ToTensor()])
 
-fds = None  # Cache FederatedDataset
+    def apply_transforms(batch):
+        batch["image"] = [transform(img) for img in batch["image"]]
+        return batch
 
-pytorch_transforms = Compose([ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    # Split the training data among the clients
+    train_data = dataset["train"].shard(num_shards=num_partitions, index=partition_id)
+    train_data = train_data.with_transform(apply_transforms)
+    
+    # The test set remains centralized/whole for evaluation
+    test_data = dataset["test"].with_transform(apply_transforms)
 
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=32)
+    
+    return train_loader, test_loader
 
-def apply_transforms(batch):
-    """Apply transforms to the partition from FederatedDataset."""
-    batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
-    return batch
-
-
-def load_data(partition_id: int, num_partitions: int, batch_size: int):
-    """Load partition CIFAR10 data."""
-    # Only initialize `FederatedDataset` once
-    global fds
-    if fds is None:
-        partitioner = IidPartitioner(num_partitions=num_partitions)
-        fds = FederatedDataset(
-            dataset="uoft-cs/cifar10",
-            partitioners={"train": partitioner},
-        )
-    partition = fds.load_partition(partition_id)
-    # Divide data on each node: 80% train, 20% test
-    partition_train_test = partition.train_test_split(test_size=0.2, seed=42)
-    # Construct dataloaders
-    partition_train_test = partition_train_test.with_transform(apply_transforms)
-    trainloader = DataLoader(
-        partition_train_test["train"], batch_size=batch_size, shuffle=True
-    )
-    testloader = DataLoader(partition_train_test["test"], batch_size=batch_size)
-    return trainloader, testloader
-
-
-def load_centralized_dataset():
-    """Load test set and return dataloader."""
-    # Load entire test set
-    test_dataset = load_dataset("uoft-cs/cifar10", split="test")
-    dataset = test_dataset.with_format("torch").with_transform(apply_transforms)
-    return DataLoader(dataset, batch_size=128)
-
-
-def train(net, trainloader, epochs, lr, device):
+# --- 3. TRAINING LOOP ---
+def train(net, trainloader, epochs, device):
     """Train the model on the training set."""
-    net.to(device)  # move model to GPU if available
-    criterion = torch.nn.CrossEntropyLoss().to(device)
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(net.parameters())
     net.train()
-    running_loss = 0.0
+    
     for _ in range(epochs):
         for batch in trainloader:
-            images = batch["img"].to(device)
-            labels = batch["label"].to(device)
+            # Notice we use the "character" key as discovered earlier
+            images = batch["image"].to(device)
+            labels = batch["character"].to(device)
+            
             optimizer.zero_grad()
-            loss = criterion(net(images), labels)
+            outputs = net(images)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-    avg_trainloss = running_loss / (epochs * len(trainloader))
-    return avg_trainloss
 
-
+# --- 4. EVALUATION LOOP ---
 def test(net, testloader, device):
     """Validate the model on the test set."""
-    net.to(device)
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss()
     correct, loss = 0, 0.0
+    net.eval()
+    
     with torch.no_grad():
         for batch in testloader:
-            images = batch["img"].to(device)
-            labels = batch["label"].to(device)
+            images = batch["image"].to(device)
+            labels = batch["character"].to(device)
+            
             outputs = net(images)
             loss += criterion(outputs, labels).item()
             correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+            
     accuracy = correct / len(testloader.dataset)
     loss = loss / len(testloader)
     return loss, accuracy
