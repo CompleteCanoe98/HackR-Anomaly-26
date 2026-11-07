@@ -42,19 +42,22 @@ class FEMNISTNet(nn.Module):
 # --- 2. DATA LOADING ---
 def load_data(partition_id: int, num_partitions: int, batch_size: int = 32):
     """Loads a specific shard of the local FEMNIST dataset."""
-    dataset = load_from_disk("./local_femnist_data")
+    dataset = load_from_disk("/Users/nathanieldeleon/Desktop/Projects/HackR-Anomaly-26/local_femnist_data")
     transform = Compose([ToTensor()])
 
     def apply_transforms(batch):
         batch["image"] = [transform(img) for img in batch["image"]]
         return batch
 
-    # Split the training data among the clients
-    train_data = dataset["train"].shard(num_shards=num_partitions, index=partition_id)
+   # Split the main dataset into 90% train, 10% test
+    split_dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)
+
+    # Shard the 90% train set among the clients
+    train_data = split_dataset["train"].shard(num_shards=num_partitions, index=partition_id)
     train_data = train_data.with_transform(apply_transforms)
-    
-    # The test set remains centralized/whole for evaluation
-    test_data = dataset["test"].with_transform(apply_transforms)
+
+    # Keep the 10% test set whole for the server's evaluation
+    test_data = split_dataset["test"].with_transform(apply_transforms)
 
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=batch_size)

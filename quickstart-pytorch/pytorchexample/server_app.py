@@ -5,8 +5,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
-from pytorchexample.task import Net, load_centralized_dataset, test
-
+from pytorchexample.task import FEMNISTNet as Net, load_data, test
 # Create ServerApp
 app = ServerApp()
 
@@ -45,18 +44,17 @@ def main(grid: Grid, context: Context) -> None:
 
 def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     """Evaluate model on central data."""
-
-    # Load the model and initialize it with the received weights
     model = Net()
     model.load_state_dict(arrays.to_torch_state_dict())
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model.to(device)
 
-    # Load entire test set
-    test_dataloader = load_centralized_dataset()
+    # Use your existing load_data function. 
+    # We pass dummy partition values (0, 1) because we only need the test_loader, 
+    # which is the same for all clients.
+    _, test_dataloader = load_data(partition_id=0, num_partitions=1)
 
     # Evaluate the global model on the test set
     test_loss, test_acc = test(model, test_dataloader, device)
 
-    # Return the evaluation metrics
     return MetricRecord({"accuracy": test_acc, "loss": test_loss})
