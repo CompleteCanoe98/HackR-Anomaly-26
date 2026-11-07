@@ -1,10 +1,8 @@
 """pytorchexample: A Flower / PyTorch app."""
-
 import torch
+from pytorchexample.task import FEMNISTNet as Net, load_data, get_malicious_ids
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
-
-from pytorchexample.task import Net, load_data
 from pytorchexample.task import test as test_fn
 from pytorchexample.task import train as train_fn
 
@@ -28,13 +26,23 @@ def train(msg: Message, context: Context):
     batch_size = context.run_config["batch-size"]
     trainloader, _ = load_data(partition_id, num_partitions, batch_size)
 
-    # Call the training function
+    # We want any data poisoning to occur before training occurs:
+    malicious_ids = get_malicious_ids(
+    num_partitions,
+    context.run_config["malicious-fraction"],
+    context.run_config["attack-seed"],
+    )
+    is_malicious = partition_id in malicious_ids
+
+    # Call the training function and determine whether that client has
+    # been made to be malicious
     train_loss = train_fn(
         model,
         trainloader,
         context.run_config["local-epochs"],
         msg.content["config"]["lr"],
         device,
+        flip_labels=is_malicious,
     )
 
     # Construct and return reply Message

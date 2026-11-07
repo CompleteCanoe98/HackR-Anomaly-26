@@ -4,6 +4,15 @@ import torch.nn.functional as F
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, ToTensor
+import random
+
+# --- Data Poisining 
+# Select random clients to become malicious
+def get_malicious_ids(num_partitions, fraction, seed):
+    count = int(num_partitions * fraction)
+    rng = random.Random(seed)
+    return set(rng.sample(range(num_partitions), count))
+
 
 # --- 1. THE MODEL ---
 class FEMNISTNet(nn.Module):
@@ -31,7 +40,7 @@ class FEMNISTNet(nn.Module):
         return F.log_softmax(x, dim=1)
 
 # --- 2. DATA LOADING ---
-def load_data(partition_id: int, num_partitions: int):
+def load_data(partition_id: int, num_partitions: int, batch_size: int = 32):
     """Loads a specific shard of the local FEMNIST dataset."""
     dataset = load_from_disk("./local_femnist_data")
     transform = Compose([ToTensor()])
@@ -47,29 +56,37 @@ def load_data(partition_id: int, num_partitions: int):
     # The test set remains centralized/whole for evaluation
     test_data = dataset["test"].with_transform(apply_transforms)
 
-    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-    test_loader = DataLoader(test_data, batch_size=32)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=batch_size)
     
     return train_loader, test_loader
 
 # --- 3. TRAINING LOOP ---
-def train(net, trainloader, epochs, device):
-    """Train the model on the training set."""
+def train(net, trainloader, epochs, lr, device, flip_labels=False, num_classes=62):
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(net.parameters())
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     net.train()
-    
+    total_loss = 0.0
+    num_batches = 0
+
     for _ in range(epochs):
         for batch in trainloader:
-            # Notice we use the "character" key as discovered earlier
             images = batch["image"].to(device)
             labels = batch["character"].to(device)
-            
+
+            if flip_labels:
+                labels = (labels + 1) % num_classes
+
             optimizer.zero_grad()
             outputs = net(images)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
+
+            total_loss += loss.item()
+            num_batches += 1
+
+    return total_loss / num_batches
 
 # --- 4. EVALUATION LOOP ---
 def test(net, testloader, device):
